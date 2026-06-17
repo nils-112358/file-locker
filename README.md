@@ -18,4 +18,4 @@ unlock.exe           # Entschlüsselt alles in stuff\
 
 ## Key
 
-AES-256-CFB mit Key `918273645` (eigenständig, nicht kompatibel mit `fsociety.exe`)
+AES-256-CFB mit Key `918273645` 
