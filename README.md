@@ -24,7 +24,7 @@ unlock.exe           # Entschlüsselt alles in stuff\
 
 ## Test
 
-`test.gif.locked` ist eine verschlüsselte Testdatei – mit `unlock.exe` entschlüsseln, probier es aus und lass dich überraschen.
+`test.gif.locked` ist eine verschlüsselte Testdatei – mit `unlock_old.exe` (nutzt keinen random key) entschlüsseln, probier es aus und lass dich überraschen.
 
 ## Kompilieren (Linux/macOS)
 
