@@ -16,6 +16,10 @@ unlock.exe           # Entschlüsselt alles in stuff\
 3. `lock.exe` erneut ausführen → alle Dateien werden verschlüsselt + `.locked` angehängt
 4. `unlock.exe` ausführen → alle `.locked`-Dateien werden entschlüsselt
 
+## Test
+
+`test.gif.locked` ist eine verschlüsselte Testdatei – mit `unlock.exe` entschlüsseln, dann sollte `test.gif` erscheinen.
+
 ## Key
 
-AES-256-CFB mit Key `918273645` 
+AES-256-CFB mit Key `918273645`
