@@ -1,95 +1,126 @@
 #include <iostream>
 #include <fstream>
+#include <filesystem>
+#include <vector>
 #include <cstring>
+#include <algorithm>
+
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <climits>
+#include <unistd.h>
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
-#include "cryptopp/modes.h"
-#include "cryptopp/aes.h"
+#include <cryptopp/osrng.h>
+#include <cryptopp/modes.h>
+#include <cryptopp/aes.h>
 
-using namespace std;
-using CryptoPP::AES;
-using CryptoPP::CFB_Mode;
-typedef unsigned char byte;
+namespace fs = std::filesystem;
+using namespace CryptoPP;
 
-void decrypt_file(const char *path){
-    size_t len = strlen(path);
-    if(len < 7 || _stricmp(path + len - 7, ".locked") != 0)
-        return;
+const int SHRED_PASSES = 3;
 
-    ifstream in(path, ios::in | ios::binary | ios::ate);
-    if(!in) return;
-
-    size_t size = (size_t)in.tellg();
-    in.seekg(0, ios::beg);
-    if(size <= 0){ in.close(); return; }
-
-    byte* cipher = new byte[size];
-    in.read(reinterpret_cast<char*>(cipher), size);
-    in.close();
-
-    byte key[AES::DEFAULT_KEYLENGTH] = { '9','1','8','2','7','3','6','4','5' };
-    byte iv[AES::BLOCKSIZE] = { '9','1','8','2','7','3','6','4','5' };
-
-    byte* plain = new byte[size];
-    CFB_Mode<AES>::Decryption dec(key, AES::DEFAULT_KEYLENGTH, iv);
-    dec.ProcessData(plain, cipher, size);
-
-    char out_name[MAX_PATH];
-    memcpy(out_name, path, len - 7);
-    out_name[len - 7] = '\0';
-
-    ofstream out(out_name, ios::out | ios::binary | ios::trunc);
-    if(out){
-        out.write(reinterpret_cast<char*>(plain), size);
-        out.close();
-    }
-
-    if(!DeleteFileA(path))
-        cout << "  Could not delete: " << path << endl;
-
-    delete[] cipher;
-    delete[] plain;
+fs::path get_base(){
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    GetModuleFileNameA(NULL, buf, MAX_PATH);
+    return fs::path(buf).parent_path();
+#elif defined(__APPLE__)
+    char buf[PATH_MAX];
+    uint32_t size = sizeof(buf);
+    _NSGetExecutablePath(buf, &size);
+    return fs::path(buf).parent_path();
+#else
+    return fs::read_symlink("/proc/self/exe").parent_path();
+#endif
 }
 
-void walk(const char *dir){
-    WIN32_FIND_DATAA findData;
-    char search[MAX_PATH];
-    snprintf(search, MAX_PATH, "%s\\*", dir);
+void shred(const fs::path &path){
+    std::error_code ec;
+    auto size = fs::file_size(path, ec);
+    if(ec || size == 0) return;
 
-    HANDLE hFind = FindFirstFileA(search, &findData);
-    if(hFind == INVALID_HANDLE_VALUE) return;
+    std::fstream f(path.string(), std::ios::in | std::ios::out | std::ios::binary);
+    if(!f) return;
 
-    do {
-        if(strcmp(findData.cFileName, ".") == 0 || strcmp(findData.cFileName, "..") == 0)
-            continue;
+    AutoSeededRandomPool rnd;
+    std::vector<byte> buf(std::min((uintmax_t)65536, size));
 
-        char full[MAX_PATH];
-        snprintf(full, MAX_PATH, "%s\\%s", dir, findData.cFileName);
+    for(int pass = 0; pass < SHRED_PASSES; pass++){
+        f.seekp(0, std::ios::beg);
+        uintmax_t remaining = size;
+        while(remaining > 0){
+            size_t chunk = (size_t)std::min((uintmax_t)buf.size(), remaining);
+            rnd.GenerateBlock(buf.data(), chunk);
+            f.write(reinterpret_cast<char*>(buf.data()), chunk);
+            remaining -= chunk;
+        }
+        f.flush();
+    }
 
-        if(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            walk(full);
-        else
-            decrypt_file(full);
-    } while(FindNextFileA(hFind, &findData) != 0);
-
-    FindClose(hFind);
+    f.close();
+    fs::remove(path, ec);
 }
 
 int main(){
-    char stuff[MAX_PATH];
-    GetModuleFileNameA(NULL, stuff, MAX_PATH);
-    char *p = strrchr(stuff, '\\');
-    if(p) *p = '\0';
-    strcat(stuff, "\\stuff");
+    fs::path base = get_base();
+    fs::path stuff = base / "stuff";
+    fs::path keyfile = base / "key.bin";
 
-    DWORD attr = GetFileAttributesA(stuff);
-    if(attr == INVALID_FILE_ATTRIBUTES){
-        cout << "'stuff' folder not found. Run lock.exe first." << endl;
+    if(!fs::exists(stuff)){
+        std::cout << "'stuff' folder not found. Run lock.exe first." << std::endl;
         return 0;
     }
 
-    cout << "Unlocking: " << stuff << endl;
-    walk(stuff);
-    cout << "Done." << endl;
+    if(!fs::exists(keyfile)){
+        std::cout << "key.bin not found!" << std::endl;
+        return 1;
+    }
+
+    std::ifstream kf(keyfile.string(), std::ios::in | std::ios::binary);
+    byte key[AES::DEFAULT_KEYLENGTH];
+    byte iv[AES::BLOCKSIZE];
+    kf.read(reinterpret_cast<char*>(key), sizeof(key));
+    kf.read(reinterpret_cast<char*>(iv), sizeof(iv));
+    kf.close();
+
+    std::cout << "Unlocking: " << stuff << std::endl;
+
+    std::error_code ec;
+    for(auto &entry : fs::recursive_directory_iterator(stuff, ec)){
+        if(!entry.is_regular_file()) continue;
+        fs::path p = entry.path();
+        std::string ext = p.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if(ext != ".locked") continue;
+
+        std::ifstream in(p.string(), std::ios::in | std::ios::binary);
+        if(!in) continue;
+        std::vector<char> data((std::istreambuf_iterator<char>(in)), {});
+        in.close();
+
+        if(data.empty()) continue;
+
+        std::vector<byte> cipher(data.begin(), data.end());
+        std::vector<byte> plain(cipher.size());
+
+        CFB_Mode<AES>::Decryption dec(key, AES::DEFAULT_KEYLENGTH, iv);
+        dec.ProcessData(plain.data(), cipher.data(), cipher.size());
+
+        fs::path out_path = p;
+        out_path.replace_extension("");
+
+        std::ofstream out(out_path.string(), std::ios::out | std::ios::binary);
+        out.write(reinterpret_cast<char*>(plain.data()), plain.size());
+        out.close();
+
+        shred(p);
+    }
+
+    std::cout << "Done." << std::endl;
     return 0;
 }
